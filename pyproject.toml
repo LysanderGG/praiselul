@@ -9,10 +9,21 @@ description = "Overtime management for Praise"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
+authors = [
+    { email = "guillaume@pafin.com" },
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
 dependencies = [
     "requests~=2.31",
     "plotly~=5.18",
 ]
+
+[project.urls]
+Repository = "https://github.com/LysanderGG/praiselul"
 
 [project.scripts]
 praiselul = "praiselul.cli:main"
