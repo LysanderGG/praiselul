@@ -1,0 +1,233 @@
+from zoneinfo import ZoneInfo
+
+from praiselul.config import Config
+from praiselul.duration import Duration
+from praiselul.time import LeaveTime, get_leave_time, get_overtime_balance, get_overtime_history, get_workplace_times
+
+DEFAULT_CONFIG = Config(praise_url="", praise_email="", praise_password="")  # 8h/day
+PART_TIME_CONFIG = Config(praise_url="", praise_email="", praise_password="", hours_per_day=6)
+
+# Use UTC in tests so clock-in timestamps don't need offset adjustment
+TZ = ZoneInfo("UTC")
+
+
+def _make_day(
+    date: str,
+    day_type: str = "working_day",
+    actual_work_minutes: int | None = None,
+    clock_in: str | None = None,
+    clock_out: str | None = None,
+    break_minutes: int | None = None,
+    sessions: list | None = None,
+) -> dict:
+    return {
+        "date": date,
+        "dayType": day_type,
+        "actualWorkMinutes": actual_work_minutes,
+        "expectedMinutes": 480,  # Praise always sends this; we ignore it for overtime calc
+        "clockIn": clock_in,
+        "clockOut": clock_out,
+        "breakMinutes": break_minutes,
+        "sessions": sessions or [],
+    }
+
+
+# --- get_overtime_history ---
+
+
+def test_overtime_history_normal_days():
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=525),  # 8:45 worked, 8:00 expected → +45
+        _make_day("2026-04-08", actual_work_minutes=505),  # 8:25 → +25
+        _make_day("2026-04-09", actual_work_minutes=432),  # 7:12 → -48
+    ]
+    labels, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert labels == ["4/7(火)", "4/8(水)", "4/9(木)"]
+    assert history == [Duration(45), Duration(25), Duration(-48)]
+
+
+def test_overtime_history_skips_rest_days_with_no_activity():
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),
+        _make_day("2026-04-08", day_type="statutory_rest_day", actual_work_minutes=None),
+        _make_day("2026-04-09", actual_work_minutes=480),
+    ]
+    labels, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert labels == ["4/7(火)", "4/9(木)"]
+    assert history == [Duration(0), Duration(0)]
+
+
+def test_overtime_history_worked_holiday():
+    """Working on a holiday (expected=0 via dayType) counts all hours as overtime."""
+    days = [
+        _make_day("2026-04-08", actual_work_minutes=480),
+        _make_day("2026-04-09", day_type="holiday", actual_work_minutes=203),  # 3:23 worked, 0 expected
+    ]
+    labels, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert labels == ["4/8(水)", "4/9(木)"]
+    assert history == [Duration(0), Duration(203)]
+
+
+def test_overtime_history_worked_rest_day():
+    """Working on a rest day counts all hours as overtime (expected=0)."""
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),
+        _make_day("2026-04-08", day_type="scheduled_rest_day", actual_work_minutes=180),  # 3h worked
+    ]
+    _, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert history == [Duration(0), Duration(180)]
+
+
+def test_overtime_history_part_time():
+    """Part-time: config.hours_per_day=6 means expected=360 per working day."""
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=494),  # 8:14 - 6:00 = +134
+        _make_day("2026-04-08", actual_work_minutes=488),  # 8:08 - 6:00 = +128
+    ]
+    _, history = get_overtime_history(days, PART_TIME_CONFIG, TZ)
+    assert history == [Duration(134), Duration(128)]
+
+
+# --- get_overtime_balance ---
+
+
+def test_overtime_balance():
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=525),  # +45
+        _make_day("2026-04-08", actual_work_minutes=505),  # +25
+        _make_day("2026-04-09", actual_work_minutes=432),  # -48
+    ]
+    assert get_overtime_balance(days, DEFAULT_CONFIG, TZ) == Duration(22)
+
+
+# --- get_workplace_times ---
+
+
+def test_workplace_times():
+    summary = {"onSiteMinutes": 2400, "remoteMinutes": 600}
+    result = get_workplace_times(summary)
+    assert result == {"On-site": Duration(2400), "Remote": Duration(600)}
+
+
+def test_workplace_times_no_remote():
+    summary = {"onSiteMinutes": 2400, "remoteMinutes": 0}
+    result = get_workplace_times(summary)
+    assert result == {"On-site": Duration(2400)}
+
+
+# --- get_leave_time ---
+
+
+def _make_open_day(date: str, clock_in: str) -> dict:
+    """Make a day with an open session (clocked in, not yet clocked out)."""
+    return _make_day(
+        date=date,
+        actual_work_minutes=None,
+        clock_in=clock_in,
+        sessions=[{"clockIn": clock_in, "clockOut": None}],
+    )
+
+
+def test_leave_time_with_break():
+    """Required > 6h → single window with break."""
+    days = [
+        # Previous day: 9 min overtime → required_today = 480-9 = 471 (>360) → break
+        _make_day("2026-04-07", actual_work_minutes=489),
+        _make_open_day("2026-04-08", clock_in="2026-04-08T09:00:00Z"),
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    # leave = 09:00 + 471min + 60min break = 17:51
+    assert leave_times == [
+        LeaveTime(includes_break=True, min_time=Duration.parse("17:51")),
+    ]
+
+
+def test_leave_time_no_break():
+    """Required < 5h → single window without break."""
+    days = [
+        # Previous days: +200min overtime → required_today = 480-200 = 280 (<300) → no break
+        _make_day("2026-04-07", actual_work_minutes=680),
+        _make_open_day("2026-04-08", clock_in="2026-04-08T09:00:00Z"),
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    # leave = 09:00 + 280min = 13:40
+    assert leave_times == [
+        LeaveTime(includes_break=False, min_time=Duration.parse("13:40")),
+    ]
+
+
+def test_double_leave_time():
+    """Required 5-6h → two windows."""
+    days = [
+        # Previous days: +150min overtime → required_today = 480-150 = 330 (between 300 and 360)
+        _make_day("2026-04-07", actual_work_minutes=630),
+        _make_open_day("2026-04-08", clock_in="2026-04-08T09:00:00Z"),
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    assert leave_times == [
+        LeaveTime(includes_break=False, min_time=Duration.parse("14:30"), max_time=Duration.parse("15:00")),
+        LeaveTime(includes_break=True, min_time=Duration.parse("15:30")),
+    ]
+
+
+def test_leave_time_negative_overtime():
+    """Negative overtime balance means more hours required today."""
+    days = [
+        # Previous day: -30min overtime → required_today = 480+30 = 510 (>360) → break
+        _make_day("2026-04-07", actual_work_minutes=450),
+        _make_open_day("2026-04-08", clock_in="2026-04-08T09:00:00Z"),
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    # leave = 09:00 + 510min + 60min = 18:30
+    assert leave_times == [
+        LeaveTime(includes_break=True, min_time=Duration.parse("18:30")),
+    ]
+
+
+def test_leave_time_already_clocked_out():
+    """Already clocked out → NoClockInError caught by CLI."""
+    from praiselul.errors import NoClockInError
+    import pytest
+
+    days = [
+        _make_day(
+            "2026-04-08",
+            actual_work_minutes=480,
+            clock_in="2026-04-08T09:00:00Z",
+            clock_out="2026-04-08T18:00:00Z",
+            sessions=[{"clockIn": "2026-04-08T09:00:00Z", "clockOut": "2026-04-08T18:00:00Z"}],
+        ),
+    ]
+    with pytest.raises(NoClockInError):
+        get_leave_time(days, DEFAULT_CONFIG, TZ)
+
+
+def test_leave_time_part_time():
+    """Part-time config: hours_per_day=6 changes the target."""
+    days = [
+        # Previous day: exactly 6h → 0 overtime → required_today = 360
+        _make_day("2026-04-07", actual_work_minutes=360),
+        _make_open_day("2026-04-08", clock_in="2026-04-08T09:00:00Z"),
+    ]
+    leave_times = get_leave_time(days, PART_TIME_CONFIG, TZ)
+    # required_today = 360 = 6h exactly → 5-6h range (double window)
+    assert leave_times == [
+        LeaveTime(includes_break=False, min_time=Duration.parse("15:00"), max_time=Duration.parse("15:00")),
+        LeaveTime(includes_break=True, min_time=Duration.parse("16:00")),
+    ]
+
+
+def test_leave_time_with_timezone():
+    """Clock-in in UTC should be converted to local time for departure calc."""
+    jst = ZoneInfo("Asia/Tokyo")
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),  # 0 overtime
+        # Clock-in at 2026-04-08T00:00:00Z = 09:00 JST
+        _make_open_day("2026-04-08", clock_in="2026-04-08T00:00:00Z"),
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, jst)
+    # required_today = 480 (>360) → break
+    # leave = 09:00 JST + 480min + 60min = 18:00
+    assert leave_times == [
+        LeaveTime(includes_break=True, min_time=Duration.parse("18:00")),
+    ]

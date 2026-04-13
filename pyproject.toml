@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools >= 68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "praiselul"
+version = "0.1.0"
+description = "Overtime management for Praise"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "requests~=2.31",
+    "plotly~=5.18",
+]
+
+[project.scripts]
+praiselul = "praiselul.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest~=8.0",
+    "ruff~=0.4",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.setuptools.packages.find]
+include = ["praiselul", "praiselul.*"]
