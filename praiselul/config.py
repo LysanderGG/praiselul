@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 DEFAULT_CONFIG_DIR = os.path.expanduser("~/.praiselul")
 DEFAULT_CONFIG_PATH = os.path.join(DEFAULT_CONFIG_DIR, "config.ini")
+DEFAULT_SESSION_PATH = os.path.join(DEFAULT_CONFIG_DIR, "session")
 
 DEFAULT_HOURS_PER_DAY = 8
 
