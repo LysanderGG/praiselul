@@ -28,9 +28,11 @@ Reuse a stored session for as long as the server accepts it. Only call
 - Use `http.cookiejar.LWPCookieJar` with `ignore_discard=True` so a server
   session/discard cookie is persisted across invocations. Plain-text format —
   **no pickle** (avoids arbitrary-code-execution on unpickling a tampered file).
-- Cache the `X-Build-Version` string alongside the session (e.g. a small
-  `session.meta` / paired value) so a warm run also skips the `/api/health`
-  preflight. Refresh it whenever we do a cold login.
+- Cache the `X-Build-Version` string in a sibling file `~/.praiselul/session.meta`
+  (a single line holding the version) so a warm run also skips the `/api/health`
+  preflight. Refresh it whenever we do a cold login. If it is missing while the
+  cookie file is present, fall back to `_fetch_build_version()` (the
+  `/api/health` call is not a login event, so this does not affect the goal).
 
 The trust level is unchanged: the password already lives in plaintext in
 `config.ini`, so a plaintext cookie file in the same directory is no worse.
