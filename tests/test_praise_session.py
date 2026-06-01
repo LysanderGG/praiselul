@@ -101,6 +101,30 @@ def test_401_triggers_single_relogin_and_retry(tmp_path):
     assert "renewed" in session_path.read_text()
 
 
+def test_426_refreshes_build_version_and_retries(tmp_path):
+    """A stale cached build version (426) re-fetches the version, retries, and re-persists it."""
+    session_path = tmp_path / "session"
+    _write_session_file(session_path, build_version="1.2.3")
+    m = _session_mock()
+    m.get.side_effect = [
+        _resp(426, {}),
+        _resp(200, {"version": "2.0.0"}),  # /api/health refresh
+        _resp(200, {"success": True, "data": {"days": []}}),
+    ]
+
+    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
+        with _make_session(tmp_path, m) as session:
+            data = session.get_timesheet(year=2026, month=6)
+
+    assert data == {"days": []}
+    m.post.assert_not_called()
+    assert m.get.call_count == 3
+    assert m.get.call_args_list[1][0][0] == "https://praise.test/api/health"
+    assert m.headers["X-Build-Version"] == "2.0.0"
+    # The refreshed build version was persisted back to disk.
+    assert session_path.with_suffix(".meta").read_text().strip() == "2.0.0"
+
+
 def test_corrupt_session_file_falls_back_to_fresh_login(tmp_path):
     """A garbage session file is treated as no session, not a crash."""
     session_path = tmp_path / "session"

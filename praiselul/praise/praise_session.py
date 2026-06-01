@@ -69,8 +69,13 @@ class PraiseSession:
         return data["data"]
 
     def _get(self, url: str, **kwargs) -> requests.Response:
-        """GET that transparently re-logs-in once if the stored session was rejected."""
+        """GET that transparently recovers once from a stale build version (426)
+        or a rejected session (401) by refreshing the relevant state and retrying."""
         response = self.session.get(url, **kwargs)
+        if response.status_code == 426:
+            self._fetch_build_version()
+            self._save_build_version()
+            response = self.session.get(url, **kwargs)
         if response.status_code == 401:
             self._login()
             self._save_session()
