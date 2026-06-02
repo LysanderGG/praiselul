@@ -10,6 +10,7 @@ from praiselul.duration import Duration
 from praiselul.errors import NoClockInError
 
 _MIN_HOURS_FOR_MANDATORY_BREAK = Duration(6 * 60)
+_MANDATORY_BREAK = Duration(60)
 
 # Japanese weekday abbreviations (Mon=0 .. Sun=6)
 _WEEKDAYS_JA = ["月", "火", "水", "木", "金", "土", "日"]
@@ -56,14 +57,68 @@ def _has_activity(day: dict[str, Any], config: Config) -> bool:
     return actual > 0 or expected > 0
 
 
-def _get_current_work_minutes(day: dict[str, Any], tz: ZoneInfo) -> int:
-    """For an open session (clocked in, no clock out), compute minutes worked so far."""
-    clock_in = _parse_iso_to_local(day.get("clockIn"), tz)
+def _session_recorded_break_minutes(session: dict[str, Any]) -> int:
+    """Minutes of break already recorded against a session by Praise.
+
+    Closed sessions carry a computed ``breakMinutes``; the open session leaves it
+    null but still reports its ``breakPeriods`` (recorded break_start/break_end
+    pairs), so fall back to summing those.
+    """
+    recorded = session.get("breakMinutes")
+    if recorded is not None:
+        return int(recorded)
+    return sum(int(bp.get("minutes") or 0) for bp in session.get("breakPeriods") or [])
+
+
+def _open_session_work_minutes(session: dict[str, Any], now: datetime, tz: ZoneInfo) -> int:
+    """Net minutes worked in the in-progress session, measured up to ``now``.
+
+    Mirrors Praise's per-session ``punch_priority`` break handling (which itself
+    matches RecoLul): a break already recorded for the session is subtracted and
+    suppresses the auto-break; otherwise the mandatory 1h break is deducted only
+    once this single session's gross reaches the threshold.
+    """
+    clock_in = _parse_iso_to_local(session.get("clockIn"), tz)
     if not clock_in:
         return 0
-    now = datetime.now(tz)
-    diff = int((now - clock_in).total_seconds() / 60)
-    return max(0, diff)
+    gross = max(0, int((now - clock_in).total_seconds() / 60))
+
+    recorded_break = _session_recorded_break_minutes(session)
+    if recorded_break > 0:
+        deduction = recorded_break
+    elif gross >= _MIN_HOURS_FOR_MANDATORY_BREAK.minutes:
+        deduction = _MANDATORY_BREAK.minutes
+    else:
+        deduction = 0
+    return max(0, gross - deduction)
+
+
+def _current_day_worked_minutes(day: dict[str, Any], now: datetime, tz: ZoneInfo) -> int:
+    """Live net work minutes for a day that still has an open session.
+
+    Sums per session: closed sessions keep Praise's already-break-adjusted
+    ``actualWorkMinutes``, and the open session is measured up to ``now`` with
+    the mandatory break applied only when no break is already recorded for it.
+    Because each session is handled independently, clocking in/out/in (a real
+    break) never triggers an extra auto-break, and inter-session gaps are not
+    counted as work.
+    """
+    total = 0
+    for session in day.get("sessions") or []:
+        if session.get("clockOut"):
+            actual = session.get("actualWorkMinutes")
+            if actual is not None:
+                total += int(actual)
+            else:
+                # Closed session without a precomputed value — derive it.
+                clock_in = _parse_iso_to_local(session.get("clockIn"), tz)
+                clock_out = _parse_iso_to_local(session.get("clockOut"), tz)
+                if clock_in and clock_out:
+                    gross = max(0, int((clock_out - clock_in).total_seconds() / 60))
+                    total += max(0, gross - _session_recorded_break_minutes(session))
+        else:
+            total += _open_session_work_minutes(session, now, tz)
+    return total
 
 
 def _day_actual_minutes(day: dict[str, Any], tz: ZoneInfo) -> int:
@@ -71,9 +126,10 @@ def _day_actual_minutes(day: dict[str, Any], tz: ZoneInfo) -> int:
     actual = day.get("actualWorkMinutes")
     if actual is not None:
         return int(actual)
-    # Open session — compute from clock-in to now
+    # Open session — compute live, applying the same per-session break logic Praise
+    # uses for closed days.
     if _is_open_session(day):
-        return _get_current_work_minutes(day, tz)
+        return _current_day_worked_minutes(day, datetime.now(tz), tz)
     return 0
 
 

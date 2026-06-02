@@ -1,8 +1,16 @@
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from praiselul.config import Config
 from praiselul.duration import Duration
-from praiselul.time import LeaveTime, get_leave_time, get_overtime_balance, get_overtime_history, get_workplace_times
+from praiselul.time import (
+    LeaveTime,
+    _current_day_worked_minutes,
+    get_leave_time,
+    get_overtime_balance,
+    get_overtime_history,
+    get_workplace_times,
+)
 
 DEFAULT_CONFIG = Config(praise_url="", praise_email="", praise_password="")  # 8h/day
 PART_TIME_CONFIG = Config(praise_url="", praise_email="", praise_password="", hours_per_day=6)
@@ -231,3 +239,86 @@ def test_leave_time_with_timezone():
     assert leave_times == [
         LeaveTime(includes_break=True, min_time=Duration.parse("18:00")),
     ]
+
+
+# --- _current_day_worked_minutes (live computation for an open/current day) ---
+
+# Fixed "now" = 16:00 UTC on the open day, so elapsed time is deterministic.
+NOW = datetime(2026, 4, 8, 16, 0, tzinfo=TZ)
+
+
+def _session(clock_in: str, clock_out: str | None = None, **extra) -> dict:
+    return {"clockIn": clock_in, "clockOut": clock_out, **extra}
+
+
+def test_current_day_single_session_over_6h_applies_auto_break():
+    """One continuous open session ≥6h with no recorded break → subtract the mandatory hour."""
+    # 09:00 → 16:00 = 7h gross, no break → 420 - 60 = 360
+    day = _make_open_day("2026-04-08", clock_in="2026-04-08T09:00:00Z")
+    assert _current_day_worked_minutes(day, NOW, TZ) == 360
+
+
+def test_current_day_single_session_at_6h_boundary_applies_auto_break():
+    """Exactly 6h hits the threshold (>=) → auto-break applies, matching RecoLul."""
+    # 10:00 → 16:00 = 6h = 360, no break → 360 - 60 = 300
+    day = _make_open_day("2026-04-08", clock_in="2026-04-08T10:00:00Z")
+    assert _current_day_worked_minutes(day, NOW, TZ) == 300
+
+
+def test_current_day_single_session_under_6h_no_break():
+    """One continuous open session <6h → no deduction."""
+    # 11:00 → 16:00 = 5h = 300
+    day = _make_open_day("2026-04-08", clock_in="2026-04-08T11:00:00Z")
+    assert _current_day_worked_minutes(day, NOW, TZ) == 300
+
+
+def test_current_day_clock_in_out_in_no_auto_break():
+    """User clocked in/out/in (a real break taken) → no auto-break even if total ≥6h."""
+    # closed 09:00–13:00 (4h) + open 14:00–16:00 (2h). Neither session ≥6h.
+    day = _make_day(
+        "2026-04-08",
+        actual_work_minutes=None,
+        clock_in="2026-04-08T09:00:00Z",
+        sessions=[
+            _session("2026-04-08T09:00:00Z", "2026-04-08T13:00:00Z", actualWorkMinutes=240),
+            _session("2026-04-08T14:00:00Z", None),
+        ],
+    )
+    # 240 (closed, trusted) + 120 (open, <6h, no break) = 360 — NOT 360-60.
+    assert _current_day_worked_minutes(day, NOW, TZ) == 360
+
+
+def test_current_day_trusts_backend_actual_for_closed_sessions():
+    """Closed sessions use the backend's already-break-adjusted actualWorkMinutes verbatim."""
+    day = _make_day(
+        "2026-04-08",
+        actual_work_minutes=None,
+        clock_in="2026-04-08T09:00:00Z",
+        sessions=[
+            # Backend says 150 (e.g. 3h gross minus a recorded 30-min break), not the 180 gross.
+            _session("2026-04-08T09:00:00Z", "2026-04-08T12:00:00Z", actualWorkMinutes=150, breakMinutes=30),
+            _session("2026-04-08T13:00:00Z", None),
+        ],
+    )
+    # 150 (trusted) + 180 (open 13:00–16:00, <6h) = 330
+    assert _current_day_worked_minutes(day, NOW, TZ) == 330
+
+
+def test_current_day_recorded_break_suppresses_auto_break():
+    """A break recorded within the open session is used instead of the mandatory hour."""
+    # 09:00 → 16:00 = 7h gross, with a recorded 30-min break → 420 - 30 = 390 (not 420 - 60).
+    day = _make_day(
+        "2026-04-08",
+        actual_work_minutes=None,
+        clock_in="2026-04-08T09:00:00Z",
+        sessions=[
+            _session(
+                "2026-04-08T09:00:00Z",
+                None,
+                breakPeriods=[
+                    {"start": "2026-04-08T12:00:00Z", "end": "2026-04-08T12:30:00Z", "minutes": 30}
+                ],
+            ),
+        ],
+    )
+    assert _current_day_worked_minutes(day, NOW, TZ) == 390
