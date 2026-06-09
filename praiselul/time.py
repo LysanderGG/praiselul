@@ -93,6 +93,37 @@ def _open_session_work_minutes(session: dict[str, Any], now: datetime, tz: ZoneI
     return max(0, gross - deduction)
 
 
+def _closed_session_work_minutes(session: dict[str, Any], tz: ZoneInfo) -> int:
+    """Net minutes for a clocked-out session.
+
+    Closed sessions keep Praise's already-break-adjusted ``actualWorkMinutes``; a
+    closed session lacking that value has it derived from its clock-in/out span
+    minus any recorded break.
+    """
+    actual = session.get("actualWorkMinutes")
+    if actual is not None:
+        return int(actual)
+    clock_in = _parse_iso_to_local(session.get("clockIn"), tz)
+    clock_out = _parse_iso_to_local(session.get("clockOut"), tz)
+    if clock_in and clock_out:
+        gross = max(0, int((clock_out - clock_in).total_seconds() / 60))
+        return max(0, gross - _session_recorded_break_minutes(session))
+    return 0
+
+
+def _closed_day_worked_minutes(day: dict[str, Any], tz: ZoneInfo) -> int:
+    """Net minutes already banked today by sessions that are clocked out.
+
+    Used to credit an earlier closed session (e.g. a morning on-site stint) toward
+    today's target while a later session is still running.
+    """
+    return sum(
+        _closed_session_work_minutes(session, tz)
+        for session in day.get("sessions") or []
+        if session.get("clockOut")
+    )
+
+
 def _current_day_worked_minutes(day: dict[str, Any], now: datetime, tz: ZoneInfo) -> int:
     """Live net work minutes for a day that still has an open session.
 
@@ -103,33 +134,28 @@ def _current_day_worked_minutes(day: dict[str, Any], now: datetime, tz: ZoneInfo
     break) never triggers an extra auto-break, and inter-session gaps are not
     counted as work.
     """
-    total = 0
-    for session in day.get("sessions") or []:
-        if session.get("clockOut"):
-            actual = session.get("actualWorkMinutes")
-            if actual is not None:
-                total += int(actual)
-            else:
-                # Closed session without a precomputed value — derive it.
-                clock_in = _parse_iso_to_local(session.get("clockIn"), tz)
-                clock_out = _parse_iso_to_local(session.get("clockOut"), tz)
-                if clock_in and clock_out:
-                    gross = max(0, int((clock_out - clock_in).total_seconds() / 60))
-                    total += max(0, gross - _session_recorded_break_minutes(session))
-        else:
-            total += _open_session_work_minutes(session, now, tz)
+    total = _closed_day_worked_minutes(day, tz)
+    open_session = _open_session(day)
+    if open_session:
+        total += _open_session_work_minutes(open_session, now, tz)
     return total
 
 
-def _day_actual_minutes(day: dict[str, Any], tz: ZoneInfo) -> int:
-    """Get actual work minutes for a day, computing live value for open sessions."""
+def _day_actual_minutes(day: dict[str, Any], tz: ZoneInfo, now: datetime | None = None) -> int:
+    """Get actual work minutes for a day, computing a live value for open sessions.
+
+    An open session is checked *first*: on a multi-session day (e.g. on-site in the
+    morning, then remote) Praise populates the day-level ``actualWorkMinutes`` from
+    the already-closed sessions, so trusting it would freeze out the still-elapsing
+    open session. ``_current_day_worked_minutes`` re-sums the closed sessions plus
+    the live open one, so it stays correct in both the single- and multi-session
+    cases.
+    """
+    if _open_session(day) is not None:
+        return _current_day_worked_minutes(day, now or datetime.now(tz), tz)
     actual = day.get("actualWorkMinutes")
     if actual is not None:
         return int(actual)
-    # Open session — compute live, applying the same per-session break logic Praise
-    # uses for closed days.
-    if _is_open_session(day):
-        return _current_day_worked_minutes(day, datetime.now(tz), tz)
     return 0
 
 
@@ -192,12 +218,40 @@ def _parse_iso_to_local(iso_str: str | None, tz: ZoneInfo) -> datetime | None:
     return dt.astimezone(tz)
 
 
-def get_clock_in_time(day: dict[str, Any], tz: ZoneInfo) -> Duration | None:
-    """Extract clock-in time as a Duration (local time) from a daily record."""
-    dt = _parse_iso_to_local(day.get("clockIn"), tz)
+def _clock_in_duration(record: dict[str, Any], tz: ZoneInfo) -> Duration | None:
+    """Extract the local clock-in time of a day or session as a Duration."""
+    dt = _parse_iso_to_local(record.get("clockIn"), tz)
     if not dt:
         return None
     return Duration(dt.hour * 60 + dt.minute)
+
+
+def get_latest_clock_in_time(day: dict[str, Any], tz: ZoneInfo) -> Duration | None:
+    """Latest session clock-in for a day, as a local-time Duration.
+
+    On a multi-session day this is the *current* session's start (e.g. the remote
+    clock-in after a morning on-site stint), not the day's first clock-in. Falls
+    back to the day-level clock-in when the day has no per-session data.
+    """
+    times = [
+        clock_in
+        for session in day.get("sessions") or []
+        if (clock_in := _clock_in_duration(session, tz)) is not None
+    ]
+    if times:
+        return max(times)
+    return _clock_in_duration(day, tz)
+
+
+def _open_session(day: dict[str, Any]) -> dict[str, Any] | None:
+    """Return the day's still-running session (no clock-out), if any.
+
+    A day can have at most one open session, so the first match is the only one.
+    """
+    for session in day.get("sessions") or []:
+        if session.get("clockOut") is None:
+            return session
+    return None
 
 
 @dataclasses.dataclass
@@ -217,12 +271,16 @@ def get_leave_time(days: list[dict[str, Any]], config: Config, tz: ZoneInfo) -> 
         raise NoClockInError()
 
     today = today_days[-1]
-    clock_in = get_clock_in_time(today, tz)
 
-    # If no clock-in or already clocked out, raise
+    # Anchor on the still-running session: on a day that mixes a closed session
+    # with an open one (e.g. on-site in the morning, then remote) the day-level
+    # ``clockIn`` is the *first* session's, so departure must be measured from the
+    # open session's clock-in instead.
+    open_session = _open_session(today)
+    if open_session is None:
+        raise NoClockInError()  # never clocked in today, or already clocked out
+    clock_in = _clock_in_duration(open_session, tz)
     if not clock_in:
-        raise NoClockInError()
-    if today.get("clockOut") and not _is_open_session(today):
         raise NoClockInError()
 
     # Compute overtime balance from all days before today
@@ -232,17 +290,24 @@ def get_leave_time(days: list[dict[str, Any]], config: Config, tz: ZoneInfo) -> 
     day_base_hours = Duration(config.hours_per_day * 60)
     required_today = day_base_hours - overtime_balance
 
-    leave_time_without_break = clock_in + required_today
-    leave_time_with_break = clock_in + required_today + Duration(60)
+    # Minutes earlier closed sessions already banked today count toward the target,
+    # so only the remainder has to come from the open session we're timing. If those
+    # sessions already met the target this goes negative and the computed leave time
+    # lands in the past — i.e. you're already over.
+    already_worked = Duration(_closed_day_worked_minutes(today, tz))
+    remaining = required_today - already_worked
 
-    if required_today > _MIN_HOURS_FOR_MANDATORY_BREAK:
+    leave_time_without_break = clock_in + remaining
+    leave_time_with_break = clock_in + remaining + Duration(60)
+
+    if remaining > _MIN_HOURS_FOR_MANDATORY_BREAK:
         return [
             LeaveTime(
                 includes_break=True,
                 min_time=leave_time_with_break,
             )
         ]
-    if required_today > _MIN_HOURS_FOR_MANDATORY_BREAK - Duration(60):
+    if remaining > _MIN_HOURS_FOR_MANDATORY_BREAK - Duration(60):
         # Between 5 and 6 hours: two windows
         first_leave_time = LeaveTime(
             includes_break=False,
@@ -260,9 +325,3 @@ def get_leave_time(days: list[dict[str, Any]], config: Config, tz: ZoneInfo) -> 
             min_time=leave_time_without_break,
         )
     ]
-
-
-def _is_open_session(day: dict[str, Any]) -> bool:
-    """Check if the day has an open (not yet clocked out) session."""
-    sessions = day.get("sessions", [])
-    return any(s.get("clockOut") is None for s in sessions)
