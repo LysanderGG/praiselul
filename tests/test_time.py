@@ -96,6 +96,60 @@ def test_overtime_history_part_time():
     assert history == [Duration(134), Duration(128)]
 
 
+# --- leave days ---
+
+
+def _make_leave_day(
+    date: str,
+    leave_unit: str,
+    category: str = "paid",
+    actual_work_minutes: int | None = None,
+) -> dict:
+    """A working_day carrying leave metadata (leave is encoded via
+    leaveCategory/leaveUnit, not as a separate dayType)."""
+    day = _make_day(date, actual_work_minutes=actual_work_minutes)
+    day["leaveType"] = "Paid Leave"
+    day["leaveUnit"] = leave_unit
+    day["leaveCategory"] = category
+    return day
+
+
+def test_overtime_history_full_day_paid_leave_is_neutral():
+    """A full paid-leave day expects 0, so it neither adds nor removes overtime.
+    (Regression: it used to count as worked-0 / expected-8h = -8h.)"""
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),  # exactly 8h → 0
+        _make_leave_day("2026-04-08", "full_day"),  # paid full-day leave → neutral
+        _make_day("2026-04-09", actual_work_minutes=480),  # 0
+    ]
+    labels, _ = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert labels == ["4/7(火)", "4/9(木)"]  # leave day has no activity → skipped
+    assert get_overtime_balance(days, DEFAULT_CONFIG, TZ) == Duration(0)
+
+
+def test_overtime_history_half_day_paid_leave():
+    """A half paid-leave day expects half the hours; the rest is real overtime."""
+    days = [_make_leave_day("2026-04-08", "half_day_am", actual_work_minutes=300)]  # 5h worked, 4h expected
+    _, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert history == [Duration(60)]
+
+
+def test_overtime_history_unpaid_leave_still_owes_full_hours():
+    """Unpaid leave does not reduce expected hours — the shortfall is intentional."""
+    days = [_make_leave_day("2026-04-08", "full_day", category="unpaid")]
+    _, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert history == [Duration(-480)]
+
+
+def test_overtime_history_unknown_paid_leave_unit_defers_to_expected_minutes():
+    """An unrecognized paid-leave unit is not assumed to be a half day — it falls
+    back to the timesheet's reported expectedMinutes."""
+    day = _make_leave_day("2026-04-08", "hourly", actual_work_minutes=360)
+    day["expectedMinutes"] = 360  # server already subtracted the leave
+    _, history = get_overtime_history([day], DEFAULT_CONFIG, TZ)
+    assert history == [Duration(0)]  # 360 worked - 360 expected, NOT 360 - 240
+
+
 # --- get_overtime_balance ---
 
 
@@ -238,6 +292,25 @@ def test_leave_time_with_timezone():
     # leave = 09:00 JST + 480min + 60min = 18:00
     assert leave_times == [
         LeaveTime(includes_break=True, min_time=Duration.parse("18:00")),
+    ]
+
+
+def test_leave_time_half_day_leave_today_targets_remaining_hours():
+    """A half-day leave *today* only requires the remaining half, so the target is
+    4h (not the full 8h) before adjusting for the prior balance."""
+    today = _make_open_day("2026-04-08", clock_in="2026-04-08T13:00:00Z")
+    today["leaveType"] = "Paid Leave"
+    today["leaveUnit"] = "half_day_am"
+    today["leaveCategory"] = "paid"
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),  # 0 balance
+        today,
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    # required_today = 240 (half day) - 0 = 240 (<5h) → no break; leave = 13:00 + 240 = 17:00.
+    # (Without the leave adjustment it would target 8h → break → 21:00.)
+    assert leave_times == [
+        LeaveTime(includes_break=False, min_time=Duration.parse("17:00")),
     ]
 
 
