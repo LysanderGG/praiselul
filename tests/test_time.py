@@ -6,6 +6,8 @@ from praiselul.duration import Duration
 from praiselul.time import (
     LeaveTime,
     _current_day_worked_minutes,
+    _day_actual_minutes,
+    get_latest_clock_in_time,
     get_leave_time,
     get_overtime_balance,
     get_overtime_history,
@@ -322,3 +324,130 @@ def test_current_day_recorded_break_suppresses_auto_break():
         ],
     )
     assert _current_day_worked_minutes(day, NOW, TZ) == 390
+
+
+# --- office-then-remote: a closed on-site session followed by an open remote one ---
+#
+# Praise summarises the day with the *first* session's clock-in and the
+# *closed* sessions' minutes, so reading those day-level fields makes `balance`
+# freeze the remote session's elapsing time and `when` anchor on the morning
+# office clock-in. These cover both.
+
+
+def _make_office_then_remote_day(
+    date: str,
+    office_in: str,
+    office_out: str,
+    office_minutes: int,
+    remote_in: str,
+) -> dict:
+    """A day with a clocked-out on-site session and a still-running remote one.
+
+    The day-level fields mirror Praise: ``clockIn`` is the office clock-in and
+    ``actualWorkMinutes`` reflects only the closed office session.
+    """
+    return _make_day(
+        date=date,
+        actual_work_minutes=office_minutes,
+        clock_in=office_in,
+        clock_out=None,
+        sessions=[
+            _session(office_in, office_out, actualWorkMinutes=office_minutes),
+            _session(remote_in, None),
+        ],
+    )
+
+
+def test_day_actual_minutes_open_session_overrides_stale_day_total():
+    """Bug 1: the open remote session keeps accruing even after Praise froze the
+    day-level actualWorkMinutes from the closed on-site session."""
+    day = _make_office_then_remote_day(
+        "2026-04-08",
+        office_in="2026-04-08T09:00:00Z",
+        office_out="2026-04-08T12:00:00Z",
+        office_minutes=180,  # stale day total: office only
+        remote_in="2026-04-08T13:00:00Z",
+    )
+    # 180 (office) + 180 (remote 13:00→16:00, <6h, no break) = 360, NOT the stale 180.
+    assert _day_actual_minutes(day, TZ, now=NOW) == 360
+
+
+def test_day_actual_minutes_closed_day_trusts_backend_total():
+    """A fully clocked-out day still trusts Praise's day-level actualWorkMinutes."""
+    day = _make_day(
+        "2026-04-08",
+        actual_work_minutes=455,
+        clock_in="2026-04-08T09:00:00Z",
+        clock_out="2026-04-08T17:35:00Z",
+        sessions=[_session("2026-04-08T09:00:00Z", "2026-04-08T17:35:00Z", actualWorkMinutes=455)],
+    )
+    assert _day_actual_minutes(day, TZ, now=NOW) == 455
+
+
+def test_leave_time_office_then_remote_anchors_on_open_session():
+    """Bug 2: departure is measured from the remote clock-in, crediting office time."""
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),  # 0 overtime → required_today = 480
+        _make_office_then_remote_day(
+            "2026-04-08",
+            office_in="2026-04-08T09:00:00Z",
+            office_out="2026-04-08T10:00:00Z",
+            office_minutes=60,  # 1h banked at the office
+            remote_in="2026-04-08T13:00:00Z",
+        ),
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    # remaining = 480 - 60 = 420 (>6h) → break; leave = 13:00 + 420 + 60 = 21:00.
+    # (The buggy day-level path gave 09:00 + 480 + 60 = 18:00.)
+    assert leave_times == [LeaveTime(includes_break=True, min_time=Duration.parse("21:00"))]
+
+
+def test_leave_time_office_then_remote_two_windows():
+    """Office credit can drop the remote remainder into the 5–6h two-window range."""
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=570),  # +90 → required_today = 390
+        _make_office_then_remote_day(
+            "2026-04-08",
+            office_in="2026-04-08T09:00:00Z",
+            office_out="2026-04-08T10:00:00Z",
+            office_minutes=60,
+            remote_in="2026-04-08T13:00:00Z",
+        ),
+    ]
+    # remaining = 390 - 60 = 330 (between 300 and 360) → two windows from 13:00.
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    assert leave_times == [
+        LeaveTime(includes_break=False, min_time=Duration.parse("18:30"), max_time=Duration.parse("19:00")),
+        LeaveTime(includes_break=True, min_time=Duration.parse("19:30")),
+    ]
+
+
+def test_leave_time_office_credit_can_cover_target():
+    """When the closed office session already meets today's target, the remainder is
+    zero, so the leave time is just the remote clock-in (no special case, no break)."""
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=600),  # +120 → required_today = 360
+        _make_office_then_remote_day(
+            "2026-04-08",
+            office_in="2026-04-08T08:00:00Z",
+            office_out="2026-04-08T15:00:00Z",
+            office_minutes=360,  # already banked the full 6h target
+            remote_in="2026-04-08T18:00:00Z",
+        ),
+    ]
+    # remaining = 360 - 360 = 0 → leave = remote clock-in (18:00), no break.
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    assert leave_times == [LeaveTime(includes_break=False, min_time=Duration.parse("18:00"))]
+
+
+def test_latest_clock_in_time_uses_current_session():
+    """balance's 'Last day' clock-in is the latest session's start, not the morning
+    on-site one."""
+    day = _make_office_then_remote_day(
+        "2026-04-08",
+        office_in="2026-04-08T09:00:00Z",
+        office_out="2026-04-08T12:00:00Z",
+        office_minutes=180,
+        remote_in="2026-04-08T13:00:00Z",
+    )
+    assert get_latest_clock_in_time(day, TZ) == Duration.parse("13:00")

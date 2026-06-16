@@ -43,7 +43,7 @@ def balance(config: Config, exclude_last_day: bool) -> None:
     if today:
         label = time.day_label(today["date"])
         print(f"\nLast day {label}")
-        clock_in_time = time.get_clock_in_time(today, tz)
+        clock_in_time = time.get_latest_clock_in_time(today, tz)
         if clock_in_time:
             print(f"  Clock-in: {clock_in_time}")
         actual_mins = time._day_actual_minutes(today, tz)
