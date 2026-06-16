@@ -150,6 +150,15 @@ def test_overtime_history_unknown_paid_leave_unit_defers_to_expected_minutes():
     assert history == [Duration(0)]  # 360 worked - 360 expected, NOT 360 - 240
 
 
+def test_overtime_history_non_unpaid_category_still_credits_hours():
+    """Any category other than unpaid credits the day's hours — gating off
+    "unpaid" (not an exact "paid" match) keeps a future paid-type category from
+    reintroducing the phantom shortfall."""
+    days = [_make_leave_day("2026-04-08", "full_day", category="special")]
+    # Full day expects 0 → neutral; under an exact "paid" match it was -8h.
+    assert get_overtime_balance(days, DEFAULT_CONFIG, TZ) == Duration(0)
+
+
 # --- get_overtime_balance ---
 
 

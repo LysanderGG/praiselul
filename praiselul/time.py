@@ -48,21 +48,23 @@ def _day_expected_minutes(day: dict[str, Any], config: Config) -> int:
     Uses config.hours_per_day for working days (matching RecoLul's behavior)
     and 0 for non-working days (rest days, holidays).
 
-    Paid leave credits the day's scheduled hours, so it must not register as a
-    shortfall: a full paid-leave day expects 0 and a half day expects half. Any
-    other leave unit defers to the timesheet's reported expected hours. Unpaid
-    leave still owes the full hours, so it is left untouched.
+    Paid leave (any category other than unpaid) credits the day's scheduled
+    hours, so it must not register as a shortfall: a full paid-leave day expects
+    0 and a half day expects half. Any other leave unit defers to the
+    timesheet's reported expected hours. Unpaid leave still owes the full hours,
+    so it is left untouched.
     """
     if not _is_working_day(day):
         return 0
     base = config.hours_per_day * 60
-    if day.get("leaveCategory") == "paid":
+    leave_category = day.get("leaveCategory")
+    if leave_category and leave_category != "unpaid":
         unit = day.get("leaveUnit")
         if unit == "full_day":
             return 0
         if unit in _HALF_DAY_LEAVE_UNITS:
             return base // 2
-        # Other paid-leave units may not cover half a day, so defer to the
+        # Other leave units may not cover half a day, so defer to the
         # timesheet's own leave-adjusted value instead of assuming.
         return int(day.get("expectedMinutes", base))
     return base
