@@ -34,6 +34,9 @@ def until_today(days: list[dict[str, Any]], tz: ZoneInfo | None = None) -> list[
 
 _NON_WORKING_DAY_TYPES = {"scheduled_rest_day", "statutory_rest_day", "holiday"}
 
+# Paid-leave units that cover half of a scheduled day.
+_HALF_DAY_LEAVE_UNITS = {"half_day_am", "half_day_pm"}
+
 
 def _is_working_day(day: dict[str, Any]) -> bool:
     return day.get("dayType") not in _NON_WORKING_DAY_TYPES
@@ -44,10 +47,27 @@ def _day_expected_minutes(day: dict[str, Any], config: Config) -> int:
 
     Uses config.hours_per_day for working days (matching RecoLul's behavior)
     and 0 for non-working days (rest days, holidays).
+
+    Paid leave (any category other than unpaid) credits the day's scheduled
+    hours, so it must not register as a shortfall: a full paid-leave day expects
+    0 and a half day expects half. Any other leave unit defers to the
+    timesheet's reported expected hours. Unpaid leave still owes the full hours,
+    so it is left untouched.
     """
     if not _is_working_day(day):
         return 0
-    return config.hours_per_day * 60
+    base = config.hours_per_day * 60
+    leave_category = day.get("leaveCategory")
+    if leave_category and leave_category != "unpaid":
+        unit = day.get("leaveUnit")
+        if unit == "full_day":
+            return 0
+        if unit in _HALF_DAY_LEAVE_UNITS:
+            return base // 2
+        # Other leave units may not cover half a day, so defer to the
+        # timesheet's own leave-adjusted value instead of assuming.
+        return int(day.get("expectedMinutes", base))
+    return base
 
 
 def _has_activity(day: dict[str, Any], config: Config) -> bool:
@@ -287,7 +307,8 @@ def get_leave_time(days: list[dict[str, Any]], config: Config, tz: ZoneInfo) -> 
     previous_days = today_days[:-1]
     overtime_balance = get_overtime_balance(previous_days, config, tz)
 
-    day_base_hours = Duration(config.hours_per_day * 60)
+    # Leave-adjusted target: a half-day leave today only requires the other half.
+    day_base_hours = Duration(_day_expected_minutes(today, config))
     required_today = day_base_hours - overtime_balance
 
     # Minutes earlier closed sessions already banked today count toward the target,
