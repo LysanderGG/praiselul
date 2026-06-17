@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "praiselul"
-version = "0.3.0"
+version = "0.3.1"
 description = "Overtime management for Praise"
 readme = "README.md"
 license = "MIT"
