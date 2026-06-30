@@ -161,6 +161,93 @@ def test_overtime_history_non_unpaid_category_still_credits_hours():
     assert get_overtime_balance(days, DEFAULT_CONFIG, TZ) == Duration(0)
 
 
+# --- pending (unapproved) leave requests ---
+
+
+def _make_pending_leave_day(
+    date: str,
+    usage: str,
+    category: str = "paid",
+    actual_work_minutes: int | None = None,
+) -> dict:
+    """A working day carrying a *pending* leave request, as Praise attaches them
+    to the timesheet day (separate from the approved leaveCategory/leaveUnit)."""
+    day = _make_day(date, actual_work_minutes=actual_work_minutes)
+    day["pendingLeaveRequests"] = [
+        {"id": "req-1", "leaveTypeName": "Paid Leave", "leaveTypeCategory": category, "usage": usage}
+    ]
+    return day
+
+
+def test_pending_full_day_paid_leave_is_neutral():
+    """A pending full-day paid request expects 0, so an empty day doesn't read as
+    a full shortfall while it awaits approval."""
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),
+        _make_pending_leave_day("2026-04-08", "full_day"),  # requested off, not yet approved
+        _make_day("2026-04-09", actual_work_minutes=480),
+    ]
+    # Without folding in pending leave this day would be 0 - 480 = -480.
+    assert get_overtime_balance(days, DEFAULT_CONFIG, TZ) == Duration(0)
+
+
+def test_pending_half_day_paid_leave_expects_half():
+    """A pending half-day paid request expects half the hours; the rest is real overtime."""
+    days = [_make_pending_leave_day("2026-04-08", "half_day_pm", actual_work_minutes=300)]  # 5h worked, 4h expected
+    _, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert history == [Duration(60)]
+
+
+def test_pending_unpaid_leave_still_owes_full_hours():
+    """Pending *unpaid* leave does not reduce expected hours — same as approved unpaid."""
+    days = [_make_pending_leave_day("2026-04-08", "full_day", category="unpaid")]
+    _, history = get_overtime_history(days, DEFAULT_CONFIG, TZ)
+    assert history == [Duration(-480)]
+
+
+def test_pending_am_and_pm_halves_cover_a_full_day():
+    """Two pending half-day requests (AM + PM) add up to a full day off → expects 0."""
+    day = _make_day("2026-04-08")  # no work logged
+    day["pendingLeaveRequests"] = [
+        {"id": "a", "leaveTypeCategory": "paid", "usage": "half_day_am"},
+        {"id": "b", "leaveTypeCategory": "paid", "usage": "half_day_pm"},
+    ]
+    assert get_overtime_balance([day], DEFAULT_CONFIG, TZ) == Duration(0)
+
+
+def test_pending_leave_never_increases_expected():
+    """Pending leave can only lower the expectation: an approved full-day (expects 0)
+    with a stray pending half on top stays 0, not base/2."""
+    day = _make_leave_day("2026-04-08", "full_day")  # approved full day → expects 0
+    day["pendingLeaveRequests"] = [{"id": "x", "leaveTypeCategory": "paid", "usage": "half_day_am"}]
+    assert get_overtime_balance([day], DEFAULT_CONFIG, TZ) == Duration(0)
+
+
+def test_pending_leave_on_non_working_day_is_ignored():
+    """A pending request on a rest day changes nothing — the day already expects 0,
+    so working it is still all overtime."""
+    day = _make_pending_leave_day("2026-04-08", "full_day", actual_work_minutes=120)
+    day["dayType"] = "statutory_rest_day"
+    _, history = get_overtime_history([day], DEFAULT_CONFIG, TZ)
+    assert history == [Duration(120)]
+
+
+def test_leave_time_pending_half_day_today_targets_remaining_hours():
+    """A pending half-day request *today* reduces today's target just like an
+    approved one, so 'when to leave' reflects requested-but-unapproved leave."""
+    today = _make_open_day("2026-04-08", clock_in="2026-04-08T13:00:00Z")
+    today["pendingLeaveRequests"] = [{"id": "x", "leaveTypeCategory": "paid", "usage": "half_day_am"}]
+    days = [
+        _make_day("2026-04-07", actual_work_minutes=480),  # 0 balance
+        today,
+    ]
+    leave_times = get_leave_time(days, DEFAULT_CONFIG, TZ)
+    # required_today = 240 (half day) - 0 = 240 (<5h) → no break; leave = 13:00 + 240 = 17:00.
+    assert leave_times == [
+        LeaveTime(includes_break=False, min_time=Duration.parse("17:00")),
+    ]
+
+
 # --- get_overtime_balance ---
 
 
