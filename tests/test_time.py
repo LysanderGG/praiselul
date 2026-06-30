@@ -14,8 +14,8 @@ from praiselul.time import (
     get_workplace_times,
 )
 
-DEFAULT_CONFIG = Config(praise_url="", praise_email="", praise_password="")  # 8h/day
-PART_TIME_CONFIG = Config(praise_url="", praise_email="", praise_password="", hours_per_day=6)
+DEFAULT_CONFIG = Config(praise_url="")  # 8h/day
+PART_TIME_CONFIG = Config(praise_url="", hours_per_day=6)
 
 # Use UTC in tests so clock-in timestamps don't need offset adjustment
 TZ = ZoneInfo("UTC")

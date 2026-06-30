@@ -16,7 +16,25 @@ pip install praiselul
 praiselul config
 ```
 
-Prompts for Praise server URL, email, password, and hours per day.
+Prompts for the Praise server URL and hours per day.
+
+## Login
+
+Praise authenticates the CLI with a browser-approved device flow (it no longer
+accepts a password — login is protected by reCAPTCHA). The first time you run a
+command, praiselul prints a short code and opens the approval page:
+
+```
+  Opening https://praise.pafin.com/cli/authorize in your browser…
+  Enter this code to authorize: ZMND-H966
+
+  Waiting for approval… (Ctrl-C to cancel)
+✓ Logged in.
+```
+
+Approve it in the browser and the command continues. The token is cached in
+`~/.praiselul/token` (revoke it anytime from **Account → Sessions**), so later
+commands don't prompt again. Manage CLI sessions there like any other login.
 
 ## Commands
 
@@ -33,6 +51,5 @@ praiselul graph --exclude-last-day
 Stored in `~/.praiselul/config.ini`. Also supports environment variables:
 
 - `PRAISE_URL`
-- `PRAISE_EMAIL`
-- `PRAISE_PASSWORD`
 - `PRAISE_HOURS_PER_DAY` (default: 8)
+- `PRAISE_TOKEN` — a `prs_cli_…` token to use directly, skipping the browser flow (for headless/CI use)
