@@ -232,6 +232,21 @@ def test_pending_leave_on_non_working_day_is_ignored():
     assert history == [Duration(120)]
 
 
+def test_approved_half_and_pending_complementary_half_cover_full_day():
+    """Approved and pending coverage sum: an approved AM half plus a pending PM
+    half cover the whole day → expects 0, not base/2."""
+    day = _make_leave_day("2026-04-08", "half_day_am")  # approved AM half → 0.5
+    day["pendingLeaveRequests"] = [{"id": "x", "leaveTypeCategory": "paid", "usage": "half_day_pm"}]
+    assert get_overtime_balance([day], DEFAULT_CONFIG, TZ) == Duration(0)
+
+
+def test_pending_non_unpaid_category_still_credits_hours():
+    """Like approved leave, pending leave gates off "unpaid" rather than an exact
+    "paid" match, so a future paid-type category still credits the hours."""
+    day = _make_pending_leave_day("2026-04-08", "full_day", category="special")
+    assert get_overtime_balance([day], DEFAULT_CONFIG, TZ) == Duration(0)
+
+
 def test_leave_time_pending_half_day_today_targets_remaining_hours():
     """A pending half-day request *today* reduces today's target just like an
     approved one, so 'when to leave' reflects requested-but-unapproved leave."""

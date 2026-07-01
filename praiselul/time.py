@@ -34,10 +34,9 @@ def until_today(days: list[dict[str, Any]], tz: ZoneInfo | None = None) -> list[
 
 _NON_WORKING_DAY_TYPES = {"scheduled_rest_day", "statutory_rest_day", "holiday"}
 
-# Paid-leave units that cover half of a scheduled day.
-_HALF_DAY_LEAVE_UNITS = {"half_day_am", "half_day_pm"}
-
-# Fraction of a scheduled day each leave unit covers.
+# Fraction of a scheduled day each paid-leave unit covers. Units absent here
+# (e.g. hourly) don't map cleanly to a fraction, so we defer to the timesheet's
+# own expected value rather than assuming one.
 _LEAVE_UNIT_FRACTIONS = {"full_day": 1.0, "half_day_am": 0.5, "half_day_pm": 0.5}
 
 
@@ -45,26 +44,24 @@ def _is_working_day(day: dict[str, Any]) -> bool:
     return day.get("dayType") not in _NON_WORKING_DAY_TYPES
 
 
-def _approved_expected_minutes(day: dict[str, Any], base: int) -> int:
-    """Expected minutes after approved leave, which Praise has already baked into
-    the day's ``leaveCategory`` / ``leaveUnit``.
+def _is_paid_leave_category(category: str | None) -> bool:
+    """Any category other than ``unpaid`` counts as paid. Gating off "unpaid"
+    (rather than matching "paid") keeps a future paid-type category from
+    reintroducing the phantom shortfall; unpaid leave still owes the hours."""
+    return bool(category) and category != "unpaid"
 
-    Paid leave (any category other than unpaid) credits the day's scheduled
-    hours, so it must not register as a shortfall: a full paid-leave day expects
-    0 and a half day expects half. Any other leave unit defers to the timesheet's
-    reported expected hours. Unpaid leave still owes the full hours.
+
+def _approved_leave_coverage(day: dict[str, Any]) -> float | None:
+    """Fraction of the day (0..1) covered by *approved* paid leave, which Praise
+    bakes into the day's ``leaveCategory`` / ``leaveUnit``.
+
+    Returns ``None`` when approved paid leave uses a unit we don't recognise, so
+    the caller can defer to the timesheet's own expected value rather than assume
+    a fraction.
     """
-    leave_category = day.get("leaveCategory")
-    if leave_category and leave_category != "unpaid":
-        unit = day.get("leaveUnit")
-        if unit == "full_day":
-            return 0
-        if unit in _HALF_DAY_LEAVE_UNITS:
-            return base // 2
-        # Other leave units may not cover half a day, so defer to the
-        # timesheet's own leave-adjusted value instead of assuming.
-        return int(day.get("expectedMinutes", base))
-    return base
+    if not _is_paid_leave_category(day.get("leaveCategory")):
+        return 0.0
+    return _LEAVE_UNIT_FRACTIONS.get(day.get("leaveUnit"))
 
 
 def _pending_paid_leave_coverage(day: dict[str, Any]) -> float:
@@ -72,34 +69,37 @@ def _pending_paid_leave_coverage(day: dict[str, Any]) -> float:
 
     Pending requests aren't reflected in ``leaveCategory`` / ``leaveUnit`` — those
     track approved leave only — so they're read off the day's
-    ``pendingLeaveRequests``. Only paid requests reduce the expectation (unpaid
-    leave still owes the hours), and an AM + PM pair adds up to a full day.
+    ``pendingLeaveRequests``. Only paid requests reduce the expectation (same
+    "anything but unpaid" rule as approved leave), and an AM + PM pair adds up to
+    a full day.
     """
     coverage = 0.0
     for request in day.get("pendingLeaveRequests") or []:
-        if request.get("leaveTypeCategory") == "paid":
+        if _is_paid_leave_category(request.get("leaveTypeCategory")):
             coverage += _LEAVE_UNIT_FRACTIONS.get(request.get("usage"), 0.0)
-    return min(1.0, coverage)
+    return coverage
 
 
 def _day_expected_minutes(day: dict[str, Any], config: Config) -> int:
     """Expected minutes for overtime calculation.
 
     Uses ``config.hours_per_day`` for working days (matching RecoLul) and 0 for
-    non-working days (rest days, holidays). Approved paid leave credits the
-    scheduled hours so it doesn't register as a shortfall; a pending (not-yet-
-    approved) paid-leave request is folded in the same way, so a day you've
-    requested off doesn't read as a deficit while it awaits approval. Pending
-    leave can only lower the expectation, never raise it.
+    non-working days (rest days, holidays). Approved and pending paid leave both
+    credit the scheduled hours so a day off (or requested off) doesn't read as a
+    shortfall; their coverage is summed, so an approved half plus a pending
+    complementary half cover the whole day. Leave can only lower the expectation,
+    never raise it.
     """
     if not _is_working_day(day):
         return 0
     base = config.hours_per_day * 60
-    expected = _approved_expected_minutes(day, base)
-    pending_coverage = _pending_paid_leave_coverage(day)
-    if pending_coverage > 0:
-        expected = min(expected, round(base * (1.0 - pending_coverage)))
-    return expected
+    approved_coverage = _approved_leave_coverage(day)
+    if approved_coverage is None:
+        # Approved paid leave in an unrecognised unit: defer to the timesheet's
+        # own leave-adjusted value rather than assuming a fraction.
+        return int(day.get("expectedMinutes", base))
+    coverage = min(1.0, approved_coverage + _pending_paid_leave_coverage(day))
+    return round(base * (1 - coverage))
 
 
 def _has_activity(day: dict[str, Any], config: Config) -> bool:
