@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import re
 import socket
+import sys
 import time
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any
 
 import requests
@@ -20,7 +21,7 @@ from praiselul.errors import CliLoginDeniedError, CliLoginError, CliLoginExpired
 # and the CLI receives a long-lived Bearer token. That token then authenticates
 # every /api/* call the same way a web session cookie does.
 
-# Safety bound on polling if the server's expiresAt can't be parsed.
+# Safety bound on how long we poll for the user to approve the login.
 DEVICE_FLOW_MAX_WAIT_SECONDS = 300
 
 
@@ -104,21 +105,24 @@ class PraiseSession:
         self.session.headers["Authorization"] = f"Bearer {self._token}"
 
     def _authenticate(self):
-        """Run the browser-approved device flow, then store and apply the token."""
+        """Run the browser-approved device flow, then store and apply the token.
+
+        Prompts go to stderr so they don't corrupt a command's piped stdout,
+        including when a mid-command 401 triggers re-auth."""
         start = self._start_device_login()
-        print(f"  Opening {start['verificationUrl']} in your browser…")
-        print(f"  Enter this code to authorize: {_format_user_code(start['userCode'])}")
+        print(f"  Opening {start['verificationUrl']} in your browser…", file=sys.stderr)
+        print(f"  Enter this code to authorize: {_format_user_code(start['userCode'])}", file=sys.stderr)
         try:
             webbrowser.open(start["verificationUrl"])
         except Exception:
             # Headless environments have no browser; the printed URL still works.
             pass
-        print("\n  Waiting for approval… (Ctrl-C to cancel)")
+        print("\n  Waiting for approval… (Ctrl-C to cancel)", file=sys.stderr)
 
         self._token = self._poll_for_token(start)
         self._apply_token()
         self._save_token(self._token)
-        print("✓ Logged in.")
+        print("✓ Logged in.", file=sys.stderr)
 
     def _start_device_login(self) -> dict[str, Any]:
         body: dict[str, str] = {}
@@ -131,10 +135,11 @@ class PraiseSession:
 
     def _poll_for_token(self, start: dict[str, Any]) -> str:
         device_code = start["deviceCode"]
-        interval = start.get("intervalSeconds", 5)
-        deadline = _poll_deadline(start.get("expiresAt"))
+        # Clamp the server-supplied interval: a bogus value shouldn't crash
+        # (negative) or hang the CLI until the deadline (huge).
+        interval = max(1, min(int(start.get("intervalSeconds", 5)), 30))
+        deadline = time.monotonic() + DEVICE_FLOW_MAX_WAIT_SECONDS
         while time.monotonic() < deadline:
-            time.sleep(interval)
             response = self.session.post(
                 f"{self._base_url}/api/auth/cli/token",
                 json={"deviceCode": device_code},
@@ -143,6 +148,7 @@ class PraiseSession:
                 return response.json()["data"]["token"]
             code = _error_code(response)
             if code == "apiError.cliLoginPending":
+                time.sleep(interval)
                 continue
             if code == "apiError.cliLoginRejected":
                 raise CliLoginDeniedError()
@@ -187,17 +193,3 @@ def _error_code(response: requests.Response) -> str | None:
         return response.json().get("error", {}).get("code")
     except ValueError:
         return None
-
-
-def _poll_deadline(expires_at: str | None) -> float:
-    """Translate the server's absolute expiry into a monotonic deadline, falling
-    back to a fixed bound if it's missing or unparseable."""
-    base = time.monotonic()
-    if not expires_at:
-        return base + DEVICE_FLOW_MAX_WAIT_SECONDS
-    try:
-        expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    except ValueError:
-        return base + DEVICE_FLOW_MAX_WAIT_SECONDS
-    remaining = (expiry - datetime.now(timezone.utc)).total_seconds()
-    return base + max(0.0, remaining)
