@@ -1,5 +1,8 @@
+import os
+
 import plotly.graph_objects as go
 
+from praiselul.config import DEFAULT_CONFIG_DIR
 from praiselul.duration import Duration
 
 
@@ -24,4 +27,6 @@ def plot_overtime_balance_history(days: list[str], overtime_history: list[Durati
     fig.update_layout(
         yaxis_title="Overtime balance (minutes)",
     )
-    fig.show()
+    os.makedirs(DEFAULT_CONFIG_DIR, exist_ok=True)
+    path = os.path.join(DEFAULT_CONFIG_DIR, "overtime.html")
+    fig.write_html(path, auto_open=True)
