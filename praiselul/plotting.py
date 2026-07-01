@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 import plotly.graph_objects as go
 
 from praiselul.duration import Duration
@@ -24,4 +27,8 @@ def plot_overtime_balance_history(days: list[str], overtime_history: list[Durati
     fig.update_layout(
         yaxis_title="Overtime balance (minutes)",
     )
-    fig.show()
+    # ponytail: fig.show()'s default 'browser' renderer serves from a one-shot
+    # localhost server that races the browser (a speculative preconnect eats the
+    # single request → "site can't be reached"). Write a real file and open that.
+    path = os.path.join(tempfile.gettempdir(), "praiselul_overtime.html")
+    fig.write_html(path, auto_open=True)
