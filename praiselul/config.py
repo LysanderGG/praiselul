@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 DEFAULT_CONFIG_DIR = os.path.expanduser("~/.praiselul")
 DEFAULT_CONFIG_PATH = os.path.join(DEFAULT_CONFIG_DIR, "config.ini")
-DEFAULT_SESSION_PATH = os.path.join(DEFAULT_CONFIG_DIR, "session")
+DEFAULT_TOKEN_PATH = os.path.join(DEFAULT_CONFIG_DIR, "token")
 
 DEFAULT_HOURS_PER_DAY = 8
 
@@ -13,8 +13,6 @@ DEFAULT_HOURS_PER_DAY = 8
 @dataclass
 class Config:
     praise_url: str
-    praise_email: str
-    praise_password: str
     hours_per_day: int = DEFAULT_HOURS_PER_DAY
 
     @classmethod
@@ -22,8 +20,6 @@ class Config:
         try:
             return cls(
                 praise_url=os.environ["PRAISE_URL"],
-                praise_email=os.environ["PRAISE_EMAIL"],
-                praise_password=os.environ["PRAISE_PASSWORD"],
                 hours_per_day=int(os.getenv("PRAISE_HOURS_PER_DAY", DEFAULT_HOURS_PER_DAY)),
             )
         except KeyError:
@@ -38,8 +34,6 @@ class Config:
         config.read(path)
         return cls(
             praise_url=config["praise"]["url"],
-            praise_email=config["praise"]["email"],
-            praise_password=config["praise"]["password"],
             hours_per_day=int(config["praise"].get("hoursPerDay", str(DEFAULT_HOURS_PER_DAY))),
         )
 
@@ -48,8 +42,6 @@ class Config:
         config = configparser.ConfigParser(interpolation=None)
         config["praise"] = {
             "url": self.praise_url,
-            "email": self.praise_email,
-            "password": self.praise_password,
             "hoursPerDay": str(self.hours_per_day),
         }
         with open(path, "w") as config_file:

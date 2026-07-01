@@ -1,6 +1,5 @@
 import argparse
 import sys
-from getpass import getpass
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -74,13 +73,9 @@ def when_to_leave(config: Config) -> None:
 
 def update_config() -> None:
     praise_url = input("praise.url: ")
-    praise_email = input("praise.email: ")
-    praise_password = getpass("praise.password: ")
     hours_per_day = input(f"praise.hoursPerDay [{DEFAULT_HOURS_PER_DAY}]: ") or str(DEFAULT_HOURS_PER_DAY)
     config = Config(
         praise_url=praise_url,
-        praise_email=praise_email,
-        praise_password=praise_password,
         hours_per_day=int(hours_per_day),
     )
     config.save()
@@ -138,11 +133,7 @@ def main() -> None:
 
 
 def _get_timesheet(config: Config) -> dict[str, Any]:
-    with PraiseSession(
-        base_url=config.praise_url,
-        email=config.praise_email,
-        password=config.praise_password,
-    ) as session:
+    with PraiseSession(base_url=config.praise_url) as session:
         return session.get_timesheet()
 
 
