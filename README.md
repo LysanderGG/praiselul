@@ -25,7 +25,7 @@ accepts a password — login is protected by reCAPTCHA). The first time you run 
 command, praiselul prints a short code and opens the approval page:
 
 ```
-  Opening https://praise.pafin.com/cli/authorize in your browser…
+  Opening https://praise.pafin.app/cli/authorize in your browser…
   Enter this code to authorize: ZMND-H966
 
   Waiting for approval… (Ctrl-C to cancel)
