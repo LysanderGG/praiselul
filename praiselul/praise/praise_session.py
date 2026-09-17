@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 import socket
 import sys
 import time
 import webbrowser
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import requests
@@ -67,7 +68,7 @@ class PraiseSession:
         return self._session
 
     def get_timesheet(self, year: int | None = None, month: int | None = None) -> dict[str, Any]:
-        now = datetime.now()
+        now = datetime.now(timezone.utc).astimezone()
         year = year or now.year
         month = month or now.month
         response = self._get(
@@ -117,11 +118,9 @@ class PraiseSession:
         start = self._start_device_login()
         print(f"  Opening {start['verificationUrl']} in your browser…", file=sys.stderr)
         print(f"  Enter this code to authorize: {_format_user_code(start['userCode'])}", file=sys.stderr)
-        try:
+        # Headless environments have no browser; the printed URL still works.
+        with contextlib.suppress(webbrowser.Error, OSError):
             webbrowser.open(start["verificationUrl"])
-        except Exception:
-            # Headless environments have no browser; the printed URL still works.
-            pass
         print("\n  Waiting for approval… (Ctrl-C to cancel)", file=sys.stderr)
 
         self._token = self._poll_for_token(start)

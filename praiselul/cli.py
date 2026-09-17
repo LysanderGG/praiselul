@@ -4,7 +4,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from praiselul import __version__, plotting, time
-from praiselul.config import Config, DEFAULT_HOURS_PER_DAY
+from praiselul.config import DEFAULT_HOURS_PER_DAY, Config
 from praiselul.duration import Duration
 from praiselul.errors import NoClockInError
 from praiselul.praise.praise_session import PraiseSession
