@@ -19,7 +19,7 @@ classifiers = [
 
 dependencies = [
     "requests~=2.31",
-    "plotly~=5.18",
+    "plotly~=7.1",
 ]
 
 [project.urls]
@@ -30,7 +30,7 @@ praiselul = "praiselul.cli:main"
 
 [project.optional-dependencies]
 dev = [
-    "pytest~=8.0",
+    "pytest~=9.1",
     "ruff==0.16.*",
 ]
 
