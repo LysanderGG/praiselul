@@ -168,6 +168,35 @@ def test_401_triggers_reauth_and_retry(tmp_path):
     assert token_path.read_text() == "prs_cli_renewed"
 
 
+def test_reauth_drops_stale_bearer_before_start(tmp_path):
+    """A 401-triggered re-auth must not present the expired token on /cli/start.
+
+    The server rejects a start-login call carrying a Bearer with 409 Conflict,
+    which previously forced a manual token deletion to recover."""
+    (tmp_path / "token").write_text("prs_cli_stale")
+    m = _session_mock()
+    start_auth_headers = []
+
+    def post(url, **kwargs):
+        if url.endswith("/api/auth/cli/start"):
+            start_auth_headers.append(m.headers.get("Authorization"))
+            return _resp(200, {"success": True, "data": START_DATA})
+        return _resp(200, {"success": True, "data": {"token": "prs_cli_renewed"}})
+
+    m.get.side_effect = [
+        _resp(401, {"success": False, "error": {"code": "apiError.sessionExpired"}}),
+        _resp(200, {"success": True, "data": {"days": []}}),
+    ]
+    m.post.side_effect = post
+
+    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
+        with _make_session(tmp_path) as session:
+            session.get_timesheet(year=2026, month=6)
+
+    assert start_auth_headers == [None]
+    assert m.headers["Authorization"] == "Bearer prs_cli_renewed"
+
+
 def test_env_token_401_is_not_reauthenticated(tmp_path, monkeypatch):
     """A 401 with a caller-supplied PRAISE_TOKEN is surfaced, not silently replaced."""
     monkeypatch.setenv("PRAISE_TOKEN", "prs_cli_fromenv")

@@ -109,6 +109,11 @@ class PraiseSession:
 
         Prompts go to stderr so they don't corrupt a command's piped stdout,
         including when a mid-command 401 triggers re-auth."""
+        # Drop any stale Bearer left over from an expired token: presenting one
+        # while opening a fresh device login makes the server reject /cli/start
+        # with 409 Conflict. The pre-auth device-flow calls are unauthenticated.
+        self.session.headers.pop("Authorization", None)
+        self._token = None
         start = self._start_device_login()
         print(f"  Opening {start['verificationUrl']} in your browser…", file=sys.stderr)
         print(f"  Enter this code to authorize: {_format_user_code(start['userCode'])}", file=sys.stderr)
