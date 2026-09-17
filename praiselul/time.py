@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -18,17 +18,16 @@ _WEEKDAYS_JA = ["月", "火", "水", "木", "金", "土", "日"]
 
 def day_label(date_str: str) -> str:
     """Convert YYYY-MM-DD to 'M/D(曜)' format like RecoLul."""
-    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    dt = date.fromisoformat(date_str)
     weekday = _WEEKDAYS_JA[dt.weekday()]
     return f"{dt.month}/{dt.day}({weekday})"
 
 
 def until_today(days: list[dict[str, Any]], tz: ZoneInfo | None = None) -> list[dict[str, Any]]:
     """Return only days up to and including today."""
-    if tz:
-        today = datetime.now(tz).strftime("%Y-%m-%d")
-    else:
-        today = datetime.now().strftime("%Y-%m-%d")
+    # astimezone(None) resolves to the local zone, so an absent tz still
+    # compares against the user's own "today".
+    today = datetime.now(timezone.utc).astimezone(tz).strftime("%Y-%m-%d")
     return [d for d in days if d["date"] <= today]
 
 

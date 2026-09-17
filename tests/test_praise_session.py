@@ -60,9 +60,8 @@ def test_cold_start_runs_device_flow_and_saves_token(tmp_path):
         _resp(200, {"success": True, "data": {"token": "prs_cli_freshtoken"}}),
     ]
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with _make_session(tmp_path):
-            pass
+    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m), _make_session(tmp_path):
+        pass
 
     assert m.post.call_args_list[0][0][0] == "https://praise.test/api/auth/cli/start"
     assert m.post.call_args_list[1][0][0] == "https://praise.test/api/auth/cli/token"
@@ -76,9 +75,8 @@ def test_warm_start_uses_saved_token_without_device_flow(tmp_path):
     (tmp_path / "token").write_text("prs_cli_saved")
     m = _session_mock()
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with _make_session(tmp_path):
-            pass
+    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m), _make_session(tmp_path):
+        pass
 
     m.post.assert_not_called()
     assert m.headers["Authorization"] == "Bearer prs_cli_saved"
@@ -90,9 +88,8 @@ def test_env_token_is_used_and_not_persisted(tmp_path, monkeypatch):
     monkeypatch.setenv("PRAISE_TOKEN", "prs_cli_fromenv")
     m = _session_mock()
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with _make_session(tmp_path):
-            pass
+    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m), _make_session(tmp_path):
+        pass
 
     m.post.assert_not_called()
     assert m.headers["Authorization"] == "Bearer prs_cli_fromenv"
@@ -108,9 +105,8 @@ def test_polling_waits_for_pending_then_succeeds(tmp_path):
         _resp(200, {"success": True, "data": {"token": "prs_cli_after_pending"}}),
     ]
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with _make_session(tmp_path):
-            pass
+    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m), _make_session(tmp_path):
+        pass
 
     assert m.headers["Authorization"] == "Bearer prs_cli_after_pending"
     assert m.post.call_count == 3
@@ -124,10 +120,12 @@ def test_denied_raises(tmp_path):
         _resp(403, {"success": False, "error": {"code": "apiError.cliLoginRejected"}}),
     ]
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with pytest.raises(CliLoginDeniedError):
-            with _make_session(tmp_path):
-                pass
+    with (
+        mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m),
+        pytest.raises(CliLoginDeniedError),
+        _make_session(tmp_path),
+    ):
+        pass
 
 
 def test_expired_raises(tmp_path):
@@ -138,10 +136,12 @@ def test_expired_raises(tmp_path):
         _resp(400, {"success": False, "error": {"code": "apiError.cliLoginExpired"}}),
     ]
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with pytest.raises(CliLoginExpiredError):
-            with _make_session(tmp_path):
-                pass
+    with (
+        mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m),
+        pytest.raises(CliLoginExpiredError),
+        _make_session(tmp_path),
+    ):
+        pass
 
 
 def test_401_triggers_reauth_and_retry(tmp_path):
@@ -158,9 +158,11 @@ def test_401_triggers_reauth_and_retry(tmp_path):
         _resp(200, {"success": True, "data": {"token": "prs_cli_renewed"}}),
     ]
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with _make_session(tmp_path) as session:
-            data = session.get_timesheet(year=2026, month=6)
+    with (
+        mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m),
+        _make_session(tmp_path) as session,
+    ):
+        data = session.get_timesheet(year=2026, month=6)
 
     assert data == {"days": []}
     assert m.get.call_count == 2
@@ -189,9 +191,11 @@ def test_reauth_drops_stale_bearer_before_start(tmp_path):
     ]
     m.post.side_effect = post
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with _make_session(tmp_path) as session:
-            session.get_timesheet(year=2026, month=6)
+    with (
+        mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m),
+        _make_session(tmp_path) as session,
+    ):
+        session.get_timesheet(year=2026, month=6)
 
     assert start_auth_headers == [None]
     assert m.headers["Authorization"] == "Bearer prs_cli_renewed"
@@ -203,10 +207,12 @@ def test_env_token_401_is_not_reauthenticated(tmp_path, monkeypatch):
     m = _session_mock()
     m.get.return_value = _resp(401, {"success": False, "error": {"code": "apiError.sessionExpired"}})
 
-    with mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m):
-        with _make_session(tmp_path) as session:
-            with pytest.raises(requests.HTTPError):
-                session.get_timesheet(year=2026, month=6)
+    with (
+        mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m),
+        _make_session(tmp_path) as session,
+        pytest.raises(requests.HTTPError),
+    ):
+        session.get_timesheet(year=2026, month=6)
 
     m.post.assert_not_called()
     assert m.get.call_count == 1

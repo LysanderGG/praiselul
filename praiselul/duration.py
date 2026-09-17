@@ -1,6 +1,3 @@
-from datetime import datetime
-
-
 class Duration:
     @classmethod
     def parse(cls, duration: str):
@@ -11,11 +8,7 @@ class Duration:
         return cls(total_minutes)
 
     @classmethod
-    def now(cls):
-        return cls.parse(datetime.now().strftime("%H:%M"))
-
-    @classmethod
-    def from_minutes(cls, minutes: int | float | None):
+    def from_minutes(cls, minutes: float | None):
         if minutes is None:
             return cls(0)
         return cls(int(minutes))

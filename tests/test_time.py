@@ -362,8 +362,9 @@ def test_leave_time_negative_overtime():
 
 def test_leave_time_already_clocked_out():
     """Already clocked out → NoClockInError caught by CLI."""
-    from praiselul.errors import NoClockInError
     import pytest
+
+    from praiselul.errors import NoClockInError
 
     days = [
         _make_day(
