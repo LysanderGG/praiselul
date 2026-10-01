@@ -15,7 +15,9 @@ def _get_tz(timesheet: dict[str, Any]) -> ZoneInfo:
 
 
 def balance(config: Config, exclude_last_day: bool) -> None:
-    timesheet = _get_timesheet(config)
+    with PraiseSession(base_url=config.praise_url) as session:
+        timesheet = session.get_timesheet()
+        remote_ids = time.remote_location_ids(session.get_clock_locations())
     tz = _get_tz(timesheet)
     days = time.until_today(timesheet["days"], tz)
     if exclude_last_day and len(days) > 1:
@@ -24,7 +26,7 @@ def balance(config: Config, exclude_last_day: bool) -> None:
     overtime_balance = time.get_overtime_balance(days, config, tz)
     print(f"Monthly overtime balance: {overtime_balance}")
 
-    workplace_times = time.get_workplace_times(timesheet["summary"])
+    workplace_times = time.get_workplace_times(timesheet["summary"], days, remote_ids, tz)
     if workplace_times:
         print("Total time per workplace:")
         for workplace, total_work_time in workplace_times.items():

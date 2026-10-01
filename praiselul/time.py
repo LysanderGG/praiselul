@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -138,13 +139,49 @@ def _session_net_minutes(gross: int, recorded_break: int) -> int:
     return max(0, gross - deduction)
 
 
-def _open_session_work_minutes(session: dict[str, Any], now: datetime, tz: ZoneInfo) -> int:
-    """Net minutes worked in the in-progress session, measured up to ``now``."""
+def _session_gross_minutes(session: dict[str, Any], tz: ZoneInfo, now: datetime | None = None) -> int:
+    """Gross minutes of a session; a still-running one is measured up to ``now``.
+
+    Praise's own ``grossMinutes`` is preferred when present, so the figure matches
+    the server's punch-precision counting; the open session never carries one.
+    A session with no clock-out and no ``now`` to measure against counts as 0.
+    """
+    gross = session.get("grossMinutes")
+    if gross is not None:
+        return int(gross)
     clock_in = _parse_iso_to_local(session.get("clockIn"), tz)
-    if not clock_in:
+    end = _parse_iso_to_local(session.get("clockOut"), tz) or now
+    if not (clock_in and end):
         return 0
-    gross = max(0, int((now - clock_in).total_seconds() / 60))
-    return _session_net_minutes(gross, _session_recorded_break_minutes(session))
+    return max(0, int((end - clock_in).total_seconds() / 60))
+
+
+def _running_break_minutes(day: dict[str, Any], now: datetime, tz: ZoneInfo) -> int:
+    """Minutes of a break still in progress, i.e. the day's last clock event is a
+    ``break_start``. ``breakPeriods`` only holds completed pairs, so Praise adds
+    this on top for the open session, counting whole minutes like its punches.
+    """
+    events = day.get("clockEvents") or []
+    if not events or events[-1].get("type") != "break_start":
+        return 0
+    start = _parse_iso_to_local(events[-1].get("timestamp"), tz)
+    if not start:
+        return 0
+    elapsed = now.replace(second=0, microsecond=0) - start.replace(second=0, microsecond=0)
+    return max(0, int(elapsed.total_seconds() // 60))
+
+
+def _open_session_work_minutes(
+    day: dict[str, Any], session: dict[str, Any], now: datetime, tz: ZoneInfo,
+) -> int:
+    """Net minutes worked in the in-progress session, measured up to ``now``.
+
+    A break still running counts as recorded break, so worked time stays flat
+    while on break and the auto-break is suppressed, as in the Praise UI.
+    """
+    gross = _session_gross_minutes(session, tz, now)
+    recorded_break = _session_recorded_break_minutes(session) + _running_break_minutes(day, now, tz)
+    return _session_net_minutes(gross, recorded_break)
 
 
 def _closed_session_work_minutes(session: dict[str, Any], tz: ZoneInfo) -> int:
@@ -155,14 +192,8 @@ def _closed_session_work_minutes(session: dict[str, Any], tz: ZoneInfo) -> int:
     null while a later session is still open. So the break rule is re-applied
     to the session's gross rather than trusting ``actualWorkMinutes`` verbatim.
     """
-    gross = session.get("grossMinutes")
-    if gross is None:
-        clock_in = _parse_iso_to_local(session.get("clockIn"), tz)
-        clock_out = _parse_iso_to_local(session.get("clockOut"), tz)
-        if not (clock_in and clock_out):
-            return 0
-        gross = max(0, int((clock_out - clock_in).total_seconds() / 60))
-    return _session_net_minutes(int(gross), _session_recorded_break_minutes(session))
+    gross = _session_gross_minutes(session, tz)
+    return _session_net_minutes(gross, _session_recorded_break_minutes(session))
 
 
 def _closed_day_worked_minutes(day: dict[str, Any], tz: ZoneInfo) -> int:
@@ -191,19 +222,18 @@ def _current_day_worked_minutes(day: dict[str, Any], now: datetime, tz: ZoneInfo
     total = _closed_day_worked_minutes(day, tz)
     open_session = _open_session(day)
     if open_session:
-        total += _open_session_work_minutes(open_session, now, tz)
+        total += _open_session_work_minutes(day, open_session, now, tz)
     return total
 
 
 def _day_actual_minutes(day: dict[str, Any], tz: ZoneInfo, now: datetime | None = None) -> int:
     """Get actual work minutes for a day, computing a live value for open sessions.
 
-    An open session is checked *first*: on a multi-session day (e.g. on-site in the
-    morning, then remote) Praise populates the day-level ``actualWorkMinutes`` from
-    the already-closed sessions, so trusting it would freeze out the still-elapsing
-    open session. ``_current_day_worked_minutes`` re-sums the closed sessions plus
-    the live open one, so it stays correct in both the single- and multi-session
-    cases.
+    An open session is checked *first*: Praise leaves the day-level
+    ``actualWorkMinutes`` null while any session is open, even on a multi-session
+    day (e.g. on-site in the morning, then remote). ``_current_day_worked_minutes``
+    re-sums the closed sessions plus the live open one, so it stays correct in
+    both the single- and multi-session cases.
     """
     if _open_session(day) is not None:
         return _current_day_worked_minutes(day, now or datetime.now(tz), tz)
@@ -241,11 +271,67 @@ def get_overtime_balance(days: list[dict[str, Any]], config: Config, tz: ZoneInf
     return sum(history, Duration())
 
 
-def get_workplace_times(summary: dict[str, Any]) -> dict[str, Duration]:
-    """Extract workplace breakdown from the timesheet summary."""
-    result = {}
+def remote_location_ids(locations: list[dict[str, Any]]) -> set[str]:
+    """Ids of the clock-in locations Praise categorises as remote."""
+    return {location["id"] for location in locations if location.get("category") == "remote"}
+
+
+def _distribute_by_gross(grosses: list[int], total: int) -> list[int]:
+    """Split ``total`` across sessions in proportion to their gross minutes.
+
+    Each share is rounded on its own, so the shares may sum to ``total`` ± 1.
+    This is Praise's on-site/remote attribution rule, reproduced exactly so the
+    figures match what its UI shows: ties round up like JS ``Math.round``, not to
+    even like Python's ``round``.
+    """
+    gross_sum = sum(grosses)
+    if gross_sum <= 0 or total <= 0:
+        return [0] * len(grosses)
+    return [math.floor(total * (gross / gross_sum) + 0.5) for gross in grosses]
+
+
+def _open_day_workplace_minutes(
+    day: dict[str, Any], remote_ids: set[str], now: datetime, tz: ZoneInfo,
+) -> tuple[int, int]:
+    """(on-site, remote) minutes a day with an open session adds to the summary.
+
+    Praise's summary attributes each day's net minutes to its sessions'
+    locations, in proportion to session gross. A day with an open session has no
+    day-level net yet, so the summary holds nothing for it — not even its closed
+    sessions. This re-derives the split from the live per-session figures, the
+    way the Praise UI overlays it.
+    """
+    sessions = day.get("sessions") or []
+    grosses = [_session_gross_minutes(session, tz, now) for session in sessions]
+    shares = _distribute_by_gross(grosses, _current_day_worked_minutes(day, now, tz))
+    remote = sum(share for session, share in zip(sessions, shares) if session.get("locationId") in remote_ids)
+    return sum(shares) - remote, remote
+
+
+def get_workplace_times(
+    summary: dict[str, Any],
+    days: list[dict[str, Any]],
+    remote_ids: set[str],
+    tz: ZoneInfo,
+    now: datetime | None = None,
+) -> dict[str, Duration]:
+    """Monthly on-site / remote totals, including the live share of today when
+    it still has an open session (which the summary leaves out entirely).
+
+    Only today is overlaid, like the Praise UI: a past day left open by a missed
+    clock-out would otherwise be measured all the way up to ``now``.
+    """
     on_site = summary.get("onSiteMinutes", 0)
     remote = summary.get("remoteMinutes", 0)
+    now = now or datetime.now(tz)
+    today = now.astimezone(tz).strftime("%Y-%m-%d")
+    for day in days:
+        if day["date"] == today and _open_session(day) is not None:
+            day_on_site, day_remote = _open_day_workplace_minutes(day, remote_ids, now, tz)
+            on_site += day_on_site
+            remote += day_remote
+
+    result = {}
     if on_site:
         result["On-site"] = Duration.from_minutes(on_site)
     if remote:

@@ -8,6 +8,7 @@ from praiselul.time import (
     _closed_day_worked_minutes,
     _current_day_worked_minutes,
     _day_actual_minutes,
+    _distribute_by_gross,
     get_latest_clock_in_time,
     get_leave_time,
     get_overtime_balance,
@@ -281,14 +282,92 @@ def test_overtime_balance():
 
 def test_workplace_times():
     summary = {"onSiteMinutes": 2400, "remoteMinutes": 600}
-    result = get_workplace_times(summary)
+    result = get_workplace_times(summary, [], {"wfh"}, TZ)
     assert result == {"On-site": Duration(2400), "Remote": Duration(600)}
 
 
 def test_workplace_times_no_remote():
     summary = {"onSiteMinutes": 2400, "remoteMinutes": 0}
-    result = get_workplace_times(summary)
+    result = get_workplace_times(summary, [], {"wfh"}, TZ)
     assert result == {"On-site": Duration(2400)}
+
+
+def test_workplace_times_closed_days_add_nothing():
+    """Closed days are already in the summary; only an open day is re-derived."""
+    summary = {"onSiteMinutes": 2400, "remoteMinutes": 600}
+    days = [
+        _make_day(
+            "2026-09-29",
+            actual_work_minutes=435,
+            sessions=[_session("2026-09-29T00:30:00Z", "2026-09-29T08:45:00Z", grossMinutes=495, locationId="wfh")],
+        )
+    ]
+    result = get_workplace_times(summary, days, {"wfh"}, TZ)
+    assert result == {"On-site": Duration(2400), "Remote": Duration(600)}
+
+
+def _make_wfh_then_open_office_day() -> dict:
+    """A closed 82-minute WFH session, then an office session still running.
+
+    Mirrors Praise's payload for such a day: the day-level totals are null while
+    a session is open, and the open session carries no ``grossMinutes``.
+    """
+    return _make_day(
+        "2026-09-30",
+        actual_work_minutes=None,
+        sessions=[
+            _session(
+                "2026-09-29T22:58:00Z", "2026-09-30T00:20:00Z",
+                grossMinutes=82, breakMinutes=0, actualWorkMinutes=82, locationId="wfh",
+            ),
+            _session("2026-09-30T00:51:00Z", None, locationId="office"),
+        ],
+    )
+
+
+def test_workplace_times_open_day_adds_live_split_before_auto_break():
+    """Under 6h of office time there is no auto-break yet, so each session's
+    share is exactly its gross: the whole closed WFH session lands on Remote."""
+    summary = {"onSiteMinutes": 7247, "remoteMinutes": 1039}
+    now = datetime(2026, 9, 30, 5, 0, tzinfo=TZ)  # office session at 4h09
+    result = get_workplace_times(summary, [_make_wfh_then_open_office_day()], {"wfh"}, TZ, now)
+    assert result == {"On-site": Duration(7247 + 249), "Remote": Duration(1039 + 82)}
+
+
+def test_workplace_times_open_day_spreads_auto_break_by_gross():
+    """Past 6h the office session owes a 1h auto-break; Praise spreads the day's
+    net over both sessions by gross, so the WFH share shrinks below its 82 gross."""
+    summary = {"onSiteMinutes": 7247, "remoteMinutes": 1039}
+    now = datetime(2026, 9, 30, 7, 45, tzinfo=TZ)  # office session at 6h54
+    result = get_workplace_times(summary, [_make_wfh_then_open_office_day()], {"wfh"}, TZ, now)
+    # day net = 82 + (414 - 60) = 436, split 82:414 -> 72 remote, 364 on-site
+    assert result == {"On-site": Duration(7247 + 364), "Remote": Duration(1039 + 72)}
+
+
+def test_workplace_times_open_day_counts_break_in_progress():
+    """A running break (last clock event ``break_start``) is recorded break, so it
+    replaces the auto-break: 30 min deducted instead of 60."""
+    day = _make_wfh_then_open_office_day()
+    day["clockEvents"] = [{"type": "break_start", "timestamp": "2026-09-30T07:15:00Z"}]
+    summary = {"onSiteMinutes": 7247, "remoteMinutes": 1039}
+    now = datetime(2026, 9, 30, 7, 45, tzinfo=TZ)  # office session at 6h54, on break for 30
+    result = get_workplace_times(summary, [day], {"wfh"}, TZ, now)
+    # day net = 82 + (414 - 30) = 466, split 82:414 -> 77 remote, 389 on-site
+    assert result == {"On-site": Duration(7247 + 389), "Remote": Duration(1039 + 77)}
+
+
+def test_workplace_times_skips_past_day_left_open():
+    """A past day with a missed clock-out stays open in Praise; measuring it up to
+    ``now`` would inflate the totals, so only today is overlaid."""
+    summary = {"onSiteMinutes": 7247, "remoteMinutes": 1039}
+    now = datetime(2026, 10, 2, 5, 0, tzinfo=TZ)
+    result = get_workplace_times(summary, [_make_wfh_then_open_office_day()], {"wfh"}, TZ, now)
+    assert result == {"On-site": Duration(7247), "Remote": Duration(1039)}
+
+
+def test_distribute_by_gross_rounds_ties_up():
+    """Praise rounds with JS ``Math.round`` (ties up), not Python's round-half-even."""
+    assert _distribute_by_gross([1, 1], 5) == [3, 3]
 
 
 # --- get_leave_time ---

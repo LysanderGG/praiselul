@@ -81,6 +81,20 @@ class PraiseSession:
             raise RuntimeError(f"API error: {data.get('error', {}).get('code', 'unknown')}")
         return data["data"]
 
+    def get_clock_locations(self) -> list[dict[str, Any]]:
+        """Locations the user can clock into, each with its ``category``
+        (``on_site`` / ``remote``). This is the only locations listing open to a
+        regular employee; the admin listing needs a management permission."""
+        response = self._get(
+            f"{self._base_url}/api/time/clock/locations",
+            params={"locale": "en"},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not data.get("success"):
+            raise RuntimeError(f"API error: {data.get('error', {}).get('code', 'unknown')}")
+        return data["data"]
+
     def get_clock_status(self) -> dict[str, Any]:
         response = self._get(
             f"{self._base_url}/api/time/clock/status",

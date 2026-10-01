@@ -216,3 +216,19 @@ def test_env_token_401_is_not_reauthenticated(tmp_path, monkeypatch):
 
     m.post.assert_not_called()
     assert m.get.call_count == 1
+
+
+def test_get_clock_locations(tmp_path):
+    (tmp_path / "token").write_text("prs_cli_ok")
+    locations = [{"id": "wfh", "name": "WFH", "category": "remote"}]
+    m = _session_mock()
+    m.get.return_value = _resp(200, {"success": True, "data": locations})
+
+    with (
+        mock.patch("praiselul.praise.praise_session.requests.Session", return_value=m),
+        _make_session(tmp_path) as session,
+    ):
+        data = session.get_clock_locations()
+
+    assert data == locations
+    assert m.get.call_args.args[0] == "https://praise.test/api/time/clock/locations"
